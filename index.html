@@ -3,62 +3,63 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NFCリーダー</title>
+  <title>QRコードリーダー</title>
+  <script src="https://unpkg.com/html5-qrcode"></script>
   <style>
-    body { font-family: sans-serif; text-align: center; padding: 50px 20px; }
-    button { padding: 15px 30px; font-size: 20px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; }
-    #status { margin-top: 30px; font-size: 18px; font-weight: bold; color: #333; }
+    body { font-family: sans-serif; text-align: center; padding: 20px; }
+    #reader { width: 100%; max-width: 400px; margin: 0 auto; }
+    #status { margin-top: 20px; font-size: 18px; font-weight: bold; color: #333; }
   </style>
 </head>
 <body>
 
-  <h1>NFC スキャナー</h1>
-  <button id="scanButton">読み取り開始</button>
-  <p id="status">ボタンを押してNFCをかざしてください</p>
+  <h1>QRスキャナー</h1>
+  <div id="reader"></div>
+  <p id="status">カメラの許可をして、QRコードをかざしてください</p>
 
   <script>
-    // ★ここにステップ1でコピーしたGASのウェブアプリURLを貼り付けます★
-    const GAS_URL = "https://script.google.com/macros/s/AKfycbzSyruVEPh4bN5rilmItU0UIw9tfjwckgzR3-i2eHyvx7eiib_I5x7ovri612lFWNf7hQ/exec";
+    // ★ここに今まで使っていたあなたのGASのURLを貼り付けます★
+    const GAS_URL = "https://script.google.com/macros/library/d/1jNU6bJJnTUiijECvANXVbmZSMif_Ajnm4chShW2Zy1luuvRA7Tzg_1IF/5";
+    
+    let isProcessing = false; // 連続読み取り防止のストッパー
 
-    document.getElementById('scanButton').addEventListener('click', async () => {
-      const statusEl = document.getElementById('status');
+    // QRコードが読み取れた時に実行される処理
+    function onScanSuccess(decodedText) {
+      // もし処理中（ストッパーがON）なら、何もしない
+      if (isProcessing) return;
       
-      try {
-        // Web NFCに対応しているかチェック
-        if (!("NDEFReader" in window)) {
-          statusEl.innerText = "エラー: このブラウザはWeb NFCに対応していません。(AndroidのChromeを使用してください)";
-          return;
-        }
+      isProcessing = true; // ストッパーをONにする
+      document.getElementById('status').innerText = `読み取り成功！ ID: ${decodedText}\nスプレッドシートへ送信中...`;
 
-        const ndef = new NDEFReader();
-        await ndef.scan();
-        statusEl.innerText = "スキャン中... スマホをNFCタグにかざしてください。";
+      // GASへデータを送信（NFCの時と同じ仕組みで送ります）
+      fetch(GAS_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: `nfcId=${encodeURIComponent(decodedText)}` // 送信パラメータ名はGASに合わせてnfcIdのままにします
+      }).then(() => {
+        document.getElementById('status').innerText = `送信完了！\n(3秒後に次を読み取れます)`;
+        
+        // 3秒後にストッパーを解除して、次の読み取りを可能にする
+        setTimeout(() => {
+          isProcessing = false;
+          document.getElementById('status').innerText = "次のQRコードをかざしてください";
+        }, 3000);
+      }).catch(err => {
+        document.getElementById('status').innerText = `送信エラー: ${err.message}`;
+        setTimeout(() => { isProcessing = false; }, 3000); // エラー時も3秒後に解除
+      });
+    }
 
-        // NFCを読み取ったときの処理
-        ndef.addEventListener("reading", async ({ serialNumber }) => {
-          statusEl.innerText = `読み取り成功！ ID: ${serialNumber}\nスプレッドシートへ送信中...`;
-
-          try {
-            // GASへデータを送信
-            await fetch(GAS_URL, {
-              method: "POST",
-              mode: "no-cors", // GASへの送信エラー（CORS）を回避するための設定
-              headers: {
-                "Content-Type": "application/x-www-form-urlencoded",
-              },
-              body: `nfcId=${encodeURIComponent(serialNumber)}`
-            });
-            
-            statusEl.innerText = `送信完了！\n次のNFCをかざすことができます。`;
-          } catch (err) {
-            statusEl.innerText = `送信エラー: ${err.message}`;
-          }
-        });
-
-      } catch (error) {
-        statusEl.innerText = `エラーが発生しました: ${error}`;
-      }
-    });
+    // QRコードリーダーの設定と起動
+    let html5QrcodeScanner = new Html5QrcodeScanner(
+      "reader", 
+      { fps: 10, qrbox: {width: 250, height: 250} }, // 読み取り枠のサイズ
+      false
+    );
+    html5QrcodeScanner.render(onScanSuccess);
   </script>
 
 </body>
