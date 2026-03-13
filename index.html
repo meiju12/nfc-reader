@@ -3,63 +3,182 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QRコードリーダー</title>
-  <script src="https://unpkg.com/html5-qrcode"></script>
+  <title>入構証リーダー (QR / NFC)</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <style>
-    body { font-family: sans-serif; text-align: center; padding: 20px; }
-    #reader { width: 100%; max-width: 400px; margin: 0 auto; }
-    #status { margin-top: 20px; font-size: 18px; font-weight: bold; color: #333; }
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      padding: 20px;
+      background-color: #f8f9fa;
+    }
+    #video-container {
+      margin: 20px auto;
+      width: 100%;
+      max-width: 400px;
+      border: 2px solid #ccc;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #000;
+    }
+    #video {
+      width: 100%;
+      display: block;
+    }
+    #btn-start {
+      padding: 15px 30px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+      background-color: #007bff;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    #btn-start:active {
+      background-color: #0056b3;
+    }
+    #status {
+      margin-top: 20px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #333;
+      padding: 15px;
+      border-radius: 5px;
+    }
+    .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .scanning { background-color: #cce5ff; color: #004085; border: 1px solid #b8daff; }
   </style>
 </head>
 <body>
 
-  <h1>QRスキャナー</h1>
-  <div id="reader"></div>
-  <p id="status">カメラの許可をして、QRコードをかざしてください</p>
+  <h2>入構証リーダー</h2>
+  <button id="btn-start">読み取り開始 (カメラ & NFC)</button>
+  
+  <div id="video-container">
+    <video id="video" autoplay playsinline></video>
+  </div>
+  <canvas id="canvas" hidden></canvas>
+  
+  <div id="status">待機中...</div>
 
   <script>
-    // ★ここに今まで使っていたあなたのGASのURLを貼り付けます★
-    const GAS_URL = "https://script.google.com/macros/s/AKfycbzSyruVEPh4bN5rilmItU0UIw9tfjwckgzR3-i2eHyvx7eiib_I5x7ovri612lFWNf7hQ/exec";
-    let isProcessing = false; // 連続読み取り防止のストッパー
+    // ==========================================
+    // 【重要】ここにGASのウェブアプリURLを貼り付けてください
+    // ==========================================
+    const GAS_URL = "https://script.google.com/macros/s/https://script.google.com/macros/s/AKfycbzSyruVEPh4bN5rilmItU0UIw9tfjwckgzR3-i2eHyvx7eiib_I5x7ovri612lFWNf7hQ/exec";
 
-    // QRコードが読み取れた時に実行される処理
-    function onScanSuccess(decodedText) {
-      // もし処理中（ストッパーがON）なら、何もしない
-      if (isProcessing) return;
-      
-      isProcessing = true; // ストッパーをONにする
-      document.getElementById('status').innerText = `読み取り成功！ ID: ${decodedText}\nスプレッドシートへ送信中...`;
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const btnStart = document.getElementById("btn-start");
+    const statusDiv = document.getElementById("status");
+    
+    let isScanning = false;
+    let scanCooldown = false; // 連続読み取り防止用のフラグ
 
-      // GASへデータを送信（NFCの時と同じ仕組みで送ります）
-      fetch(GAS_URL, {
-        method: "POST",
-        mode: "no-cors",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: `nfcId=${encodeURIComponent(decodedText)}` // 送信パラメータ名はGASに合わせてnfcIdのままにします
-      }).then(() => {
-        document.getElementById('status').innerText = `送信完了！\n(3秒後に次を読み取れます)`;
+    // 「読み取り開始」ボタンを押したときの処理
+    btnStart.addEventListener("click", async () => {
+      if (isScanning) return;
+      isScanning = true;
+      btnStart.textContent = "読み取り中...";
+      updateStatus("QRコードまたはNFCをかざしてください", "scanning");
+
+      // 1. カメラ（QRコード）の起動
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { facingMode: "environment" } 
+        });
+        video.srcObject = stream;
+        video.setAttribute("playsinline", true);
+        video.play();
+        requestAnimationFrame(scanQR);
+      } catch (err) {
+        console.error("カメラエラー:", err);
+        updateStatus("カメラを起動できませんでした", "error");
+      }
+
+      // 2. NFCの待機起動
+      if ("NDEFReader" in window) {
+        try {
+          const ndef = new NDEFReader();
+          await ndef.scan();
+          
+          ndef.addEventListener("reading", event => {
+            if (scanCooldown) return; // クールダウン中は無視
+            
+            const decoder = new TextDecoder();
+            for (const record of event.message.records) {
+              const textData = decoder.decode(record.data);
+              handleScannedData(textData, "NFC");
+            }
+          });
+        } catch (error) {
+          console.error("NFCエラー:", error);
+          // エラーが出てもQRコードは使えるように画面表示は上書きしない
+        }
+      } else {
+        console.log("このブラウザはWeb NFCに非対応です（QRのみ動作します）");
+      }
+    });
+
+    // QRコードを毎フレーム監視する処理
+    function scanQR() {
+      if (video.readyState === video.HAVE_ENOUGH_DATA && !scanCooldown) {
+        canvas.height = video.videoHeight;
+        canvas.width = video.videoWidth;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         
-        // 3秒後にストッパーを解除して、次の読み取りを可能にする
-        setTimeout(() => {
-          isProcessing = false;
-          document.getElementById('status').innerText = "次のQRコードをかざしてください";
-        }, 3000);
-      }).catch(err => {
-        document.getElementById('status').innerText = `送信エラー: ${err.message}`;
-        setTimeout(() => { isProcessing = false; }, 3000); // エラー時も3秒後に解除
-      });
+        // jsQRで画像を解析
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
+        
+        if (code && code.data) {
+          handleScannedData(code.data, "QR");
+        }
+      }
+      if (isScanning) {
+        requestAnimationFrame(scanQR);
+      }
     }
 
-    // QRコードリーダーの設定と起動
-    let html5QrcodeScanner = new Html5QrcodeScanner(
-      "reader", 
-      { fps: 10, qrbox: {width: 250, height: 250} }, // 読み取り枠のサイズ
-      false
-    );
-    html5QrcodeScanner.render(onScanSuccess);
-  </script>
+    // 読み取ったデータを処理してGASへ送る
+    function handleScannedData(data, type) {
+      scanCooldown = true; // 連続読み取りを一時ストップ
+      updateStatus(`【${type}】読み取り成功！送信中...`, "scanning");
+      
+      // GASへデータ送信（GETリクエスト）
+      const targetUrl = GAS_URL + "?id=" + encodeURIComponent(data);
+      
+      // no-corsモードで送信（GAS特有のCORSエラー回避のため）
+      fetch(targetUrl, { mode: "no-cors" })
+        .then(() => {
+          updateStatus(`記録完了: ${data}`, "success");
+          
+          // 3秒後に次の人の読み取りを再開
+          setTimeout(() => {
+            updateStatus("次の入構証をかざしてください", "scanning");
+            scanCooldown = false;
+          }, 3000);
+        })
+        .catch(error => {
+          console.error("送信エラー:", error);
+          updateStatus("送信に失敗しました", "error");
+          
+          setTimeout(() => {
+            updateStatus("QRコードまたはNFCをかざしてください", "scanning");
+            scanCooldown = false;
+          }, 3000);
+        });
+    }
 
+    // ステータス表示（画面の色と文字）の更新用関数
+    function updateStatus(message, className) {
+      statusDiv.textContent = message;
+      statusDiv.className = className;
+    }
+  </script>
 </body>
 </html>
